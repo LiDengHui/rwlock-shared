@@ -1,67 +1,102 @@
-// src/ReadWriteLock.ts
+// ReadWriteLock with writer-priority using SharedArrayBuffer and Atomics
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 export class ReadWriteLock {
-  public lock: Int32Array
-  public readonly WRITE_LOCK = 1
-  public readonly READ_COUNT = 0
+  public state: Int32Array
 
-  constructor(sharedBuffer: SharedArrayBuffer) {
-    this.lock = new Int32Array(sharedBuffer)
-    // 确保初始状态原子化
-    Atomics.compareExchange(this.lock, this.READ_COUNT, -1, 0)
-    Atomics.compareExchange(this.lock, this.WRITE_LOCK, -1, 0)
+  // Index constants for clarity
+  static readonly READERS = 0
+  static readonly WRITER = 1
+  static readonly WAITERS = 2
+
+  timeout: number = 500
+
+  constructor(
+    sharedBuffer: SharedArrayBuffer,
+    config: { timeout?: number } = {}
+  ) {
+    // Shared buffer: [readers, writerFlag, waitingWriters]
+    this.state = new Int32Array(sharedBuffer)
+    this.timeout = config.timeout || this.timeout
   }
 
-  async readLock() {
+  /** Acquire a read lock (async). Blocks if a writer is active or waiting. */
+  async readLock(): Promise<void> {
     while (true) {
-      // 双重检查：获取读锁前再次验证无写操作
-      const currentWriteLock = Atomics.load(this.lock, this.WRITE_LOCK)
-      if (currentWriteLock === 0) {
-        Atomics.add(this.lock, this.READ_COUNT, 1)
-
-        if (Atomics.load(this.lock, this.WRITE_LOCK) === 0) {
-          break
-        }
-        Atomics.sub(this.lock, this.READ_COUNT, 1)
+      const writerFlag = Atomics.load(this.state, ReadWriteLock.WRITER)
+      const waitingWriters = Atomics.load(this.state, ReadWriteLock.WAITERS)
+      // If no writer holds or is waiting, increment readers count and proceed
+      if (writerFlag === 0 && waitingWriters === 0) {
+        Atomics.add(this.state, ReadWriteLock.READERS, 1)
+        return
       }
-      const { async, value } = Atomics.waitAsync(this.lock, this.WRITE_LOCK, 0)
-      if (async) {
-        await value
-      }
+      // Otherwise wait (sleep) on the writer flag index until notified
+      await Atomics.waitAsync(this.state, ReadWriteLock.WRITER, 0, this.timeout)
+        .value
+      await delay(0)
+      // After wake-up, loop and recheck conditions
     }
   }
 
-  readUnlock() {
-    Atomics.sub(this.lock, this.READ_COUNT, 1)
-    // 最后一个读锁释放时唤醒可能等待的写锁
-    if (Atomics.load(this.lock, this.READ_COUNT) === 0) {
-      // Atomics.notify(this.lock, this.WRITE_LOCK)
+  /** Release a read lock. Wakes a waiting writer if this was the last reader. */
+  readUnlock(): void {
+    // Decrement reader count atomically
+    Atomics.sub(this.state, ReadWriteLock.READERS, 1)
+    // If there are no more active readers and writers are waiting, wake one writer
+    const waitingWriters = Atomics.load(this.state, ReadWriteLock.WAITERS)
+    if (waitingWriters > 0) {
+      Atomics.notify(this.state, ReadWriteLock.READERS)
     }
   }
 
-  async writeLock() {
+  /** Acquire a write lock (async). Blocks until no readers or writers are active. */
+  async writeLock(): Promise<void> {
+    // Mark this thread as a waiting writer
+    Atomics.add(this.state, ReadWriteLock.WAITERS, 1)
     while (true) {
-      const currentWriteLock = Atomics.load(this.lock, this.WRITE_LOCK)
-      if (currentWriteLock === 0) {
-        if (Atomics.compareExchange(this.lock, this.WRITE_LOCK, 0, 1) === 0) {
-          break
-        }
+      const readers = Atomics.load(this.state, ReadWriteLock.READERS)
+      // If no readers or writer, acquire the write lock by setting writerFlag = 1
+      if (
+        readers === 0 &&
+        Atomics.compareExchange(this.state, ReadWriteLock.WRITER, 0, 1) === 0
+      ) {
+        break
       }
-      const { async, value } = Atomics.waitAsync(
-        this.lock,
-        this.WRITE_LOCK,
-        currentWriteLock
-      )
-      if (async) {
-        await value
+      // Otherwise wait: prefer waiting on readers index if readers exist
+      if (readers > 0) {
+        await Atomics.waitAsync(
+          this.state,
+          ReadWriteLock.READERS,
+          0,
+          this.timeout
+        ).value
+      } else {
+        await Atomics.waitAsync(
+          this.state,
+          ReadWriteLock.WRITER,
+          0,
+          this.timeout
+        ).value
       }
+
+      await delay(0)
+      // Loop to recheck conditions after waking
     }
+    // Done waiting: no longer queued
+    Atomics.sub(this.state, ReadWriteLock.WAITERS, 1)
   }
 
-  writeUnlock() {
-    // 先清除写锁再通知
-    Atomics.store(this.lock, this.WRITE_LOCK, 0)
-    // 优先唤醒写等待线程，再唤醒读线程
-    Atomics.notify(this.lock, this.WRITE_LOCK)
-    Atomics.notify(this.lock, this.READ_COUNT)
+  /** Release the write lock. Wakes the next waiter(s) based on priority. */
+  writeUnlock(): void {
+    // Clear the writer flag
+    Atomics.store(this.state, ReadWriteLock.WRITER, 0)
+
+    // If writers are waiting, wake one writer; otherwise wake all waiting readers
+    const waitingWriters = Atomics.load(this.state, ReadWriteLock.WAITERS)
+
+    if (waitingWriters > 0) {
+      Atomics.notify(this.state, ReadWriteLock.WRITER, 1)
+    } else {
+      Atomics.notify(this.state, ReadWriteLock.WRITER, Number.POSITIVE_INFINITY)
+    }
   }
 }

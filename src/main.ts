@@ -29,7 +29,6 @@ let count = 0
 arr.forEach((worker) => {
   worker.postMessage({ lockBuffer, dataBuffer })
   worker.onmessage = async (event) => {
-    console.log('count', count)
     if (event.data === 'read') {
       count++
       if (count === COUNT) {

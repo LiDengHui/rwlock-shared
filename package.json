@@ -18,18 +18,27 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "ava"
+    "test": "vitest"
   },
   "devDependencies": {
     "prettier": "^3.3.3",
     "typescript": "^5.4.5",
     "vite": "6.3.4",
-    "vitest": "^3.1.3"
+    "vitest": "^3.1.4"
   },
   "dependencies": {
     "vite-plugin-dts": "^4.2.2"
   },
   "repository": {
-    "url": ""
-  }
+    "type": "git",
+    "url": "https://github.com/LiDengHui/rwlock-shared"
+  },
+  "keywords": [
+    "rwlock",
+    "shared",
+    "lock"
+  ],
+  "author": "LiDengHui",
+  "license": "MIT",
+    "description": "A simple implementation of a read-write lock with shared read"
 }
